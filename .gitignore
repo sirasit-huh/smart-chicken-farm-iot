@@ -1,0 +1,11 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Local database
+server/farm_history.db
+
+# OS files
+.DS_Store
+Thumbs.db
+*.log
