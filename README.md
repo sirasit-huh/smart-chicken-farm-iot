@@ -20,7 +20,7 @@
 ```powershell
 node server/server.js
 ```
-เปิดเว็บเบราว์เซอร์ไปที่: **http://localhost:3000**
+เปิดเว็บเบราว์เซอร์ไปที่: **http://localhost:3001**
 
 ### หน้าต่างที่ 2: รัน Simulator จำลองข้อมูลทั้ง 3 โรง
 ```powershell

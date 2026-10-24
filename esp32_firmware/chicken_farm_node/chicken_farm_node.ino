@@ -3,16 +3,18 @@
   Project: Smart Chicken Farm - ESP32 Node Firmware
   Sensor : SHT31 (I2C: SDA=21, SCL=22)
   Output : LED (Pin 2 หรือขานอกที่ต้องการ)
-  Protocol: MQTT
+  Protocol: MQTTS (MQTT over TLS - Port 8883)
   ==============================================================
 
-  วิธีนำไปใช้กับ 3 บอร์ด:
+  วิธีนำไปใช้กับหลายบอร์ด / หลายโรงเรือน:
   1. บอร์ดที่ 1: ตั้ง HOUSE_ID เป็น "house1"
   2. บอร์ดที่ 2: ตั้ง HOUSE_ID เป็น "house2"
   3. บอร์ดที่ 3: ตั้ง HOUSE_ID เป็น "house3"
+  4. บอร์ดใหม่: ตั้ง HOUSE_ID ให้ตรงกับรหัสโรงเรือนที่สร้างบนหน้าเว็บ (เช่น "house4")
 */
 
 #include <WiFi.h>
+#include <WiFiClientSecure.h> // ไลบรารีสำหรับเข้ารหัส TLS (MQTTS)
 #include <PubSubClient.h>
 #include <Wire.h>
 #include <Adafruit_SHT31.h>
@@ -21,14 +23,15 @@
 // ----------------------------------------------------
 // 1. ตั้งค่าบอร์ดและเครือข่าย
 // ----------------------------------------------------
-#define HOUSE_ID        "house3"          // เปลี่ยนเป็น house1, house2, house3 สำหรับแต่ละบอร์ด
+#define HOUSE_ID        "house4"          // เปลี่ยนเป็น house1, house2, house3 หรือรหัสโรงเรือนที่สร้างในระบบ
+#define SENSOR_KEY      "iot_secret_2026" // รหัสความปลอดภัยเซนเซอร์ (Sensor Security Key)
 #define LED_PIN         2                 // ขา LED บนบอร์ด ESP32 (GPIO 2) หรือเปลี่ยนเป็นขาอื่นที่ต่อ LED แยก
 
 const char* ssid        = "sirasit";     // ชื่อ WiFi (หรือแชร์ Hotspot จากมือถือ)
 const char* password    = "0988315400"; // รหัสผ่าน WiFi
 
-const char* mqtt_server = "broker.hivemq.com"; // MQTT Public Broker (เสถียรกับเน็ต Hotspot มือถือ)
-const int   mqtt_port   = 1883;
+const char* mqtt_server = "broker.hivemq.com"; // MQTT Public Broker
+const int   mqtt_port   = 8883;                // พอร์ต 8883 สำหรับ MQTT over TLS (เข้ารหัสข้อมูลระหว่างส่ง)
 const char* mqtt_prefix = "smartfarm_iot_2026"; // Prefix ตรงกับ Backend Server
 
 // MQTT Topics
@@ -36,8 +39,8 @@ String topicTelemetry   = String(mqtt_prefix) + "/" + HOUSE_ID + "/telemetry";
 String topicLightSet    = String(mqtt_prefix) + "/" + HOUSE_ID + "/light/set";
 String topicLightStatus = String(mqtt_prefix) + "/" + HOUSE_ID + "/light/status";
 
-// ออบเจ็กต์การทำงาน
-WiFiClient espClient;
+// ออบเจ็กต์การทำงาน (ใช้ WiFiClientSecure สำหรับ TLS)
+WiFiClientSecure espClient;
 PubSubClient client(espClient);
 Adafruit_SHT31 sht31 = Adafruit_SHT31();
 
@@ -84,7 +87,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
 }
 
 // ----------------------------------------------------
-// 3. ฟังก์ชันเชื่อมต่อ WiFi และ MQTT
+// 3. ฟังก์ชันเชื่อมต่อ WiFi และ MQTTS (TLS)
 // ----------------------------------------------------
 void setup_wifi() {
   delay(10);
@@ -107,11 +110,11 @@ void setup_wifi() {
 
 void reconnect() {
   while (!client.connected()) {
-    Serial.print("กำลังเชื่อมต่อ MQTT...");
+    Serial.print("กำลังเชื่อมต่อ MQTTS (TLS Port 8883)...");
     String clientId = "ESP32_" + String(HOUSE_ID) + "_" + String(random(0xffff), HEX);
 
     if (client.connect(clientId.c_str())) {
-      Serial.println(" สำเร็จ!");
+      Serial.println(" สำเร็จ (เข้ารหัส TLS)!");
       // Subscribe รับคำสั่งเปิด-ปิดไฟ
       client.subscribe(topicLightSet.c_str());
       Serial.printf("📡 รอรับคำสั่งที่ Topic: %s\n", topicLightSet.c_str());
@@ -133,6 +136,9 @@ void setup() {
   digitalWrite(LED_PIN, LOW); // เริ่มต้นปิดไฟ
 
   setup_wifi();
+
+  // เปิดใช้งานการเข้ารหัส TLS (ข้ามการตรวจไฟล์ CA Certificate เพื่อไม่ให้มีปัญหาใบรับรองหมดอายุบนบอร์ด)
+  espClient.setInsecure();
 
   client.setServer(mqtt_server, mqtt_port);
   client.setCallback(callback);
@@ -166,17 +172,18 @@ void loop() {
       h = 65.0;
     }
 
-    // สร้าง JSON Data
+    // สร้าง JSON Data พร้อม Sensor Key
     StaticJsonDocument<200> doc;
     doc["temp"] = round(t * 10) / 10.0;
     doc["hum"]  = round(h * 10) / 10.0;
     doc["light"] = currentLightState;
+    doc["key"]  = SENSOR_KEY;
 
     char buffer[256];
     serializeJson(doc, buffer);
 
-    // ยิงขึ้น MQTT
+    // ยิงขึ้น MQTT ผ่านช่องทางที่เข้ารหัส TLS
     client.publish(topicTelemetry.c_str(), buffer);
-    Serial.printf(" [%s] Temp: %.1f °C, Hum: %.1f %% -> Sent!\n", HOUSE_ID, t, h);
+    Serial.printf(" [TLS][%s] Temp: %.1f °C, Hum: %.1f %% -> Sent!\n", HOUSE_ID, t, h);
   }
 }

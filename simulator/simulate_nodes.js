@@ -4,11 +4,12 @@
  */
 const mqtt = require('mqtt');
 
-const MQTT_BROKER = process.env.MQTT_BROKER || 'mqtt://broker.hivemq.com:1883';
+const MQTT_BROKER = process.env.MQTT_BROKER || 'mqtts://broker.hivemq.com:8883';
 const MQTT_PREFIX = 'smartfarm_iot_2026';
 
 const client = mqtt.connect(MQTT_BROKER, {
-  clientId: `simulator_${Math.random().toString(16).substr(2, 8)}`
+  clientId: `simulator_${Math.random().toString(16).substr(2, 8)}`,
+  rejectUnauthorized: false
 });
 
 // สถานะจำลองของ 3 โรงเรือน
@@ -72,7 +73,8 @@ function publishTelemetry() {
     const data = {
       temp: parseFloat(node.temp.toFixed(1)),
       hum: parseFloat(node.hum.toFixed(1)),
-      light: node.light
+      light: node.light,
+      key: 'iot_secret_2026'
     };
 
     const topic = `${MQTT_PREFIX}/${houseId}/telemetry`;
