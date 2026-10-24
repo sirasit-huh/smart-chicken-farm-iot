@@ -57,12 +57,14 @@ async function apiFetch(url, options = {}) {
 // -----------------------------------------------------------------
 // 1. AUTHENTICATION (เข้าด้วย 1 คลิก หรือกรอกรหัสเอง)
 // -----------------------------------------------------------------
+// ปุ่มลัดกรอกชื่อผู้ใช้และรหัสผ่านให้อัตโนมัติแล้วเข้าสู่ระบบทันที
 function quickLogin(username, password) {
   document.getElementById('login-username').value = username;
   document.getElementById('login-password').value = password;
   handleLogin();
 }
 
+// ส่งชื่อผู้ใช้และรหัสผ่านไปตรวจที่ Server เพื่อรับ Token (บัตรผ่าน)
 async function handleLogin(e) {
   if (e && e.preventDefault) e.preventDefault();
   const username = document.getElementById('login-username').value.trim();
@@ -99,6 +101,7 @@ async function handleLogin(e) {
   }
 }
 
+// เมื่อ Login สำเร็จ: ซ่อนหน้า Login, โชว์หน้า Dashboard และเช็คสิทธิ์ Admin/User
 function onLoginSuccess() {
   document.getElementById('login-screen').classList.add('hidden');
   document.getElementById('app-container').classList.remove('hidden');
@@ -135,6 +138,7 @@ function onLoginSuccess() {
   fetchRules();
 }
 
+// ออกจากระบบ: แจ้ง Server ให้ยกเลิก Token และกลับไปหน้า Login
 async function handleLogout() {
   try {
     if (authToken) {
@@ -149,12 +153,14 @@ async function handleLogout() {
   showLoginScreen();
 }
 
+// สลับหน้าจอกลับไปแสดงหน้า Login
 function showLoginScreen() {
   document.getElementById('app-container').classList.add('hidden');
   document.getElementById('login-screen').classList.remove('hidden');
   document.getElementById('login-password').value = '';
 }
 
+// ดาวน์โหลดข้อมูลประวัติเซนเซอร์จาก Server ออกมาเป็นไฟล์ CSV
 async function downloadCSV() {
   try {
     const res = await apiFetch('/api/export/csv');
@@ -175,6 +181,7 @@ async function downloadCSV() {
 // -----------------------------------------------------------------
 // 2. TOPOLOGY: FARM TABS BAR & COOPS DYNAMIC RENDERING
 // -----------------------------------------------------------------
+// ดึงข้อมูลฟาร์มและโรงเรือนทั้งหมดจาก Server มาวาดบนหน้าเว็บ
 async function fetchTopologyAndRender() {
   try {
     const res = await apiFetch('/api/topology');
@@ -185,12 +192,28 @@ async function fetchTopologyAndRender() {
   }
 }
 
+// อัปเดตตัวแปรฟาร์ม/โรงเรือน แล้วสั่งวาดแถบฟาร์ม, การ์ดโรงเรือน และกราฟใหม่
 function applyTopology(farms, houses) {
   currentFarms = farms;
   currentHouseStates = houses;
 
-  if (selectedFarmFilter !== 'all' && !currentFarms.some(f => f.id === selectedFarmFilter)) {
+  const isAdmin = currentUser && currentUser.role === 'admin';
+  if (!isAdmin && currentUser && currentUser.farm_id) {
+    selectedFarmFilter = currentUser.farm_id;
+  } else if (selectedFarmFilter !== 'all' && !currentFarms.some(f => f.id === selectedFarmFilter)) {
     selectedFarmFilter = 'all';
+  }
+
+  // อัปเดตป้ายชื่อผู้ใช้ด้านบนให้แสดงชื่อฟาร์มที่สังกัดชัดเจน
+  const roleBadge = document.getElementById('user-role-badge');
+  if (roleBadge && currentUser) {
+    if (isAdmin) {
+      roleBadge.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span> Admin (${currentUser.username} - ทุกฟาร์ม)`;
+    } else {
+      const myFarm = currentFarms.find(f => f.id === currentUser.farm_id);
+      const farmLabel = myFarm ? myFarm.name : currentUser.farm_id;
+      roleBadge.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-sky-500"></span> User: ${currentUser.username} (${farmLabel})`;
+    }
   }
 
   renderFarmTabsBar();
@@ -200,6 +223,7 @@ function applyTopology(farms, houses) {
   fetchHistoryData();
 }
 
+// วาดแถบปุ่มเลือกฟาร์มด้านบนสุด (1 User เห็นเฉพาะฟาร์มของตัวเอง ส่วน Admin เห็นทุกฟาร์มและเพิ่ม/ลบได้)
 function renderFarmTabsBar() {
   const bar = document.getElementById('farm-tabs-bar');
   if (!bar) return;
@@ -207,13 +231,17 @@ function renderFarmTabsBar() {
   const isAdmin = currentUser && currentUser.role === 'admin';
   const allCount = Object.keys(currentHouseStates).length;
 
-  let html = `
-    <button type="button" onclick="selectFarmTab('all')"
-            class="sh-btn ${selectedFarmFilter === 'all' ? 'sh-btn-primary' : 'sh-btn-outline'} h-8 px-3">
-      <i class="fa-solid fa-layer-group text-[11px]"></i>
-      <span>ทุกฟาร์ม (${allCount})</span>
-    </button>
-  `;
+  let html = '';
+
+  if (isAdmin) {
+    html += `
+      <button type="button" onclick="selectFarmTab('all')"
+              class="sh-btn ${selectedFarmFilter === 'all' ? 'sh-btn-primary' : 'sh-btn-outline'} h-8 px-3">
+        <i class="fa-solid fa-layer-group text-[11px]"></i>
+        <span>ทุกฟาร์ม (${allCount})</span>
+      </button>
+    `;
+  }
 
   currentFarms.forEach(f => {
     const count = Object.values(currentHouseStates).filter(c => c.farmId === f.id).length;
@@ -224,6 +252,7 @@ function renderFarmTabsBar() {
       <div class="inline-flex items-center">
         <button type="button" onclick="selectFarmTab('${f.id}')"
                 class="sh-btn ${isActive ? 'sh-btn-primary' : 'sh-btn-outline'} h-8 px-3 ${canDelete ? 'rounded-r-none border-r-0' : ''}">
+          <i class="fa-solid fa-warehouse text-[11px]"></i>
           <span>${f.name} (${count})</span>
         </button>
         ${canDelete ? `
@@ -259,6 +288,7 @@ function renderFarmTabsBar() {
   }
 }
 
+// เมื่อคลิกเลือกแท็บฟาร์ม: กรองแสดงเฉพาะโรงเรือนและกราฟของฟาร์มที่เลือก
 function selectFarmTab(farmId) {
   selectedFarmFilter = farmId;
   renderFarmTabsBar();
@@ -268,6 +298,7 @@ function selectFarmTab(farmId) {
   fetchHistoryData();
 }
 
+// เปิด/ปิดช่องกรอกชื่อฟาร์มใหม่บนแถบด้านบน
 function toggleInlineAddFarm(show) {
   const form = document.getElementById('inline-add-farm-form');
   const input = document.getElementById('inline-farm-name');
@@ -285,6 +316,7 @@ function toggleInlineAddFarm(show) {
   }
 }
 
+// ส่งชื่อฟาร์มใหม่ไปสร้างในฐานข้อมูล (เฉพาะ Admin)
 async function handleInlineCreateFarm(e) {
   e.preventDefault();
   const input = document.getElementById('inline-farm-name');
@@ -309,6 +341,7 @@ async function handleInlineCreateFarm(e) {
   }
 }
 
+// ลบฟาร์มที่เลือกและโรงเรือนภายในฟาร์มนั้น (เฉพาะ Admin)
 async function deleteFarm(farmId) {
   const farm = currentFarms.find(f => f.id === farmId);
   if (!confirm(`ยืนยันการลบฟาร์ม "${farm ? farm.name : farmId}" และโรงเรือนทั้งหมดในฟาร์มนี้?`)) return;
@@ -323,6 +356,7 @@ async function deleteFarm(farmId) {
   }
 }
 
+// คืนค่ารายการโรงเรือนที่ตรงกับแท็บฟาร์มที่กำลังเลือกอยู่
 function getFilteredCoops() {
   return Object.values(currentHouseStates).filter(c => {
     if (selectedFarmFilter !== 'all' && c.farmId !== selectedFarmFilter) return false;
@@ -330,6 +364,7 @@ function getFilteredCoops() {
   });
 }
 
+// อัปเดตรายชื่อโรงเรือนใน Dropdown ของกราฟ และ Dropdown ตั้งกฎอัตโนมัติ
 function renderCoopSelectors() {
   const chartSelect = document.getElementById('chart-house-select');
   const ruleSelect = document.getElementById('rule-house');
@@ -359,6 +394,7 @@ function renderCoopSelectors() {
   }
 }
 
+// วาดการ์ดแสดงค่าอุณหภูมิ, ความชื้น, ดัชนี THI และปุ่มเปิด-ปิดไฟของแต่ละโรงเรือน
 function renderCoopsGrid() {
   const grid = document.getElementById('coops-grid');
   if (!grid) return;
@@ -456,6 +492,7 @@ function renderCoopsGrid() {
 // -----------------------------------------------------------------
 // QUICK ADD COOP MODAL (เฉพาะ Admin - กรอกค่าเริ่มต้นให้อัตโนมัติ)
 // -----------------------------------------------------------------
+// เปิดหน้าต่างเพิ่มโรงเรือนใหม่ พร้อมรันเลขรหัส (เช่น house5) ให้อัตโนมัติ
 function openAddCoopModal() {
   if (!currentUser || currentUser.role !== 'admin') return;
   const modal = document.getElementById('add-coop-modal');
@@ -488,11 +525,13 @@ function openAddCoopModal() {
   if (nameInput) nameInput.focus();
 }
 
+// ปิดหน้าต่างเพิ่มโรงเรือนใหม่
 function closeAddCoopModal() {
   const modal = document.getElementById('add-coop-modal');
   if (modal) modal.classList.add('hidden');
 }
 
+// ส่งข้อมูลโรงเรือนใหม่ไปบันทึกที่ Server (เพิ่มเข้า Whitelist)
 async function handleQuickCreateCoop(e) {
   e.preventDefault();
   const name = document.getElementById('quick-coop-name').value.trim();
@@ -514,6 +553,7 @@ async function handleQuickCreateCoop(e) {
   }
 }
 
+// ลบโรงเรือนที่เลือกออกจากระบบ (เฉพาะ Admin)
 async function deleteCoop(coopId) {
   const coop = currentHouseStates[coopId];
   if (!confirm(`ยืนยันการลบโรงเรือน "${coop ? coop.name : coopId}"?`)) return;
@@ -529,6 +569,7 @@ async function deleteCoop(coopId) {
 // -----------------------------------------------------------------
 // 3. DEMO MODE & REAL HARDWARE TOGGLE
 // -----------------------------------------------------------------
+// ดึงสถานะปัจจุบันว่าเปิดโหมดข้อมูลตัวอย่าง (Demo) อยู่หรือไม่
 async function fetchDemoMode() {
   try {
     const res = await apiFetch('/api/demo');
@@ -539,6 +580,7 @@ async function fetchDemoMode() {
   }
 }
 
+// สั่งสลับโหมดระหว่าง "ข้อมูลตัวอย่าง (Demo)" กับ "ตรวจบอร์ดจริง"
 async function toggleDemoMode(forceVal) {
   try {
     const targetVal = typeof forceVal === 'boolean' ? forceVal : !currentDemoMode;
@@ -553,6 +595,7 @@ async function toggleDemoMode(forceVal) {
   }
 }
 
+// อัปเดตสีและข้อความปุ่มโหมด Demo บนหน้าเว็บ
 function updateDemoUI(demoMode) {
   currentDemoMode = demoMode;
 
@@ -582,9 +625,9 @@ socket.on('demo_status', ({ demoMode }) => {
   fetchTopologyAndRender();
 });
 
-socket.on('topology_updated', ({ farms, houses }) => {
+socket.on('topology_updated', () => {
   if (!authToken) return;
-  applyTopology(farms || [], houses || {});
+  fetchTopologyAndRender();
 });
 
 // -----------------------------------------------------------------
@@ -592,6 +635,7 @@ socket.on('topology_updated', ({ farms, houses }) => {
 // -----------------------------------------------------------------
 let isMenuOpen = false;
 
+// เปิด/ปิดเมนูแถบด้านข้าง (ปุ่มแฮมเบอร์เกอร์ 3 ขีดมุมขวาบน)
 function toggleMenu(forceState) {
   const sideMenu = document.getElementById('side-menu');
   const backdrop = document.getElementById('menu-backdrop');
@@ -634,11 +678,13 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+// โหลดค่าโหมดมืด/สว่างที่เคยเลือกไว้มาใช้งานตอนเปิดเว็บ
 function initTheme() {
   const savedTheme = localStorage.getItem('farm-theme') || 'dark';
   applyTheme(savedTheme);
 }
 
+// สลับโหมดหน้าจอระหว่าง โหมดมืด (Dark) กับ โหมดสว่าง (Light)
 function toggleTheme() {
   const isDark = document.documentElement.classList.contains('dark');
   const nextTheme = isDark ? 'light' : 'dark';
@@ -647,6 +693,7 @@ function toggleTheme() {
   updateChartTheme();
 }
 
+// เปลี่ยนสีพื้นหลังและไอคอนตามธีม มืด/สว่าง
 function applyTheme(theme) {
   const html = document.documentElement;
   const textEl = document.getElementById('theme-text');
@@ -663,6 +710,7 @@ function applyTheme(theme) {
   }
 }
 
+// ปรับสีตารางและตัวอักษรของกราฟให้เข้ากับโหมดมืด/สว่าง
 function updateChartTheme() {
   if (!historyChart) return;
   const isDark = document.documentElement.classList.contains('dark');
@@ -679,9 +727,13 @@ function updateChartTheme() {
 // -----------------------------------------------------------------
 // 5. SOCKET.IO REALTIME EVENTS
 // -----------------------------------------------------------------
+// รับค่าอุณหภูมิ/ความชื้นแบบ Real-time จาก Server แล้วอัปเดตตัวเลขและกราฟทันที
 socket.on('telemetry', (payload) => {
   if (!authToken) return;
   const { houseId, data } = payload;
+  if (currentUser && currentUser.role !== 'admin' && data.farmId !== currentUser.farm_id) {
+    return; // User ปกติดูได้เฉพาะฟาร์มที่ตัวเองสังกัดเท่านั้น
+  }
   currentHouseStates[houseId] = data;
   updateHouseUI(houseId, data);
   updateMasterLightButtons();
@@ -751,6 +803,7 @@ socket.on('security_log', () => {
 // -----------------------------------------------------------------
 // 6. UI UPDATE HELPERS & LIGHT CONTROLS
 // -----------------------------------------------------------------
+// เปิด/ปิดการใช้งานปุ่มสั่งไฟรวม (ทำงานได้เฉพาะเมื่อมีอย่างน้อย 1 โรงเรือนที่ Online)
 function updateMasterLightButtons() {
   const coops = getFilteredCoops();
   const anyOnline = coops.some(h => h && h.online);
@@ -760,6 +813,7 @@ function updateMasterLightButtons() {
   if (offBtn) offBtn.disabled = !anyOnline;
 }
 
+// อัปเดตตัวเลขอุณหภูมิ, ความชื้น, สีระดับความเครียด THI และป้าย Online/Offline บนการ์ด
 function updateHouseUI(houseId, data) {
   const tempEl = document.getElementById(`temp-${houseId}`);
   const humEl = document.getElementById(`hum-${houseId}`);
@@ -809,6 +863,7 @@ function updateHouseUI(houseId, data) {
   updateLightUI(houseId, isOnline ? (data.light || 'OFF') : 'OFF');
 }
 
+// เมื่อกดสวิตช์ไฟในการ์ดโรงเรือน: สลับค่า ON <-> OFF แล้วส่งคำสั่ง
 function toggleLight(houseId) {
   if (!currentHouseStates[houseId] || !currentHouseStates[houseId].online) return;
   const currentState = currentLightStates[houseId] || 'OFF';
@@ -816,6 +871,7 @@ function toggleLight(houseId) {
   setLight(houseId, nextAction);
 }
 
+// อัปเดตสีปุ่มและข้อความสถานะไฟ (เปิดอยู่ / ปิดอยู่ / ออฟไลน์) บนการ์ดโรงเรือน
 function updateLightUI(houseId, state) {
   const isOnline = !!(currentHouseStates[houseId] && currentHouseStates[houseId].online);
   currentLightStates[houseId] = isOnline ? state : 'OFF';
@@ -860,6 +916,7 @@ function updateLightUI(houseId, state) {
   }
 }
 
+// ยิง API ส่งคำสั่งเปิด-ปิดไฟไปที่ Server (แนบ Token อัตโนมัติผ่าน apiFetch)
 async function setLight(houseId, action) {
   try {
     await apiFetch('/api/light', {
@@ -871,6 +928,7 @@ async function setLight(houseId, action) {
   }
 }
 
+// ปุ่มลัดสั่งเปิดหรือปิดไฟพร้อมกันทุกโรงเรือนที่กำลังแสดงอยู่
 async function controlAllLight(action) {
   const coops = getFilteredCoops();
   const anyOnline = coops.some(h => h && h.online);
@@ -881,6 +939,7 @@ async function controlAllLight(action) {
 // -----------------------------------------------------------------
 // 7. CHART.JS SETUP & DYNAMIC RENDERING
 // -----------------------------------------------------------------
+// ตั้งค่าเริ่มต้นของกราฟเส้น Chart.js (แกนซ้าย=อุณหภูมิ, แกนขวา=ความชื้น)
 function initChart() {
   const ctx = document.getElementById('historyChart').getContext('2d');
   const isDark = document.documentElement.classList.contains('dark');
@@ -925,6 +984,7 @@ function initChart() {
   });
 }
 
+// ดึงข้อมูลย้อนหลัง 25 จุดล่าสุดจาก Server มาวาดลงกราฟ
 async function fetchHistoryData() {
   if (!authToken) return;
   const houseSelect = document.getElementById('chart-house-select');
@@ -950,6 +1010,7 @@ async function fetchHistoryData() {
   }
 }
 
+// วาดกราฟเมื่อเลือกดูเฉพาะโรงเรือนเดียว
 function renderSingleHouseChart(data, metric, houseId) {
   const coop = currentHouseStates[houseId];
   const titleName = coop ? `${coop.name} [${houseId}]` : houseId;
@@ -992,6 +1053,7 @@ function renderSingleHouseChart(data, metric, houseId) {
   historyChart.update();
 }
 
+// วาดกราฟเปรียบเทียบหลายโรงเรือนพร้อมกันโดยแยกสีอัตโนมัติ
 function renderMultiCoopsChart(data, metric) {
   const coops = getFilteredCoops();
   let longestSeries = [];
@@ -1051,6 +1113,7 @@ function renderMultiCoopsChart(data, metric) {
 // -----------------------------------------------------------------
 // 8. AUTOMATION RULE ENGINE
 // -----------------------------------------------------------------
+// ดึงรายการกฎอัตโนมัติ (IF-THEN) จาก Server มาแสดงในตารางด้านล่าง
 async function fetchRules() {
   if (!authToken) return;
   try {
@@ -1082,6 +1145,7 @@ async function fetchRules() {
   }
 }
 
+// บันทึกกฎอัตโนมัติใหม่ที่ผู้ใช้ตั้งค่าส่งไปเก็บที่ Server
 async function createRule(e) {
   e.preventDefault();
   const rule = {
@@ -1105,6 +1169,7 @@ async function createRule(e) {
   }
 }
 
+// ลบกฎอัตโนมัติที่เลือกออก
 async function deleteRule(id) {
   try {
     await apiFetch(`/api/rules/${id}`, { method: 'DELETE' });
@@ -1117,17 +1182,20 @@ async function deleteRule(id) {
 // -----------------------------------------------------------------
 // 9. ADMIN USERS & SENSOR SECURITY MODAL
 // -----------------------------------------------------------------
+// เปิดหน้าต่างตั้งค่าระบบของ Admin (จัดการผู้ใช้ และ Sensor Security)
 function openAdminModal(defaultTab = 'users') {
   if (!currentUser || currentUser.role !== 'admin') return;
   document.getElementById('admin-modal').classList.remove('hidden');
   switchAdminTab(defaultTab);
 }
 
+// ปิดหน้าต่างตั้งค่าระบบของ Admin
 function closeAdminModal() {
   const modal = document.getElementById('admin-modal');
   if (modal) modal.classList.add('hidden');
 }
 
+// สลับแท็บภายในหน้าต่าง Admin ระหว่าง "ผู้ใช้งาน" กับ "ความปลอดภัย & Logs"
 function switchAdminTab(tab) {
   const tabs = ['users', 'security'];
   tabs.forEach(t => {
@@ -1147,39 +1215,88 @@ function switchAdminTab(tab) {
   if (tab === 'security') fetchSecurityData();
 }
 
+// ดึงรายชื่อบัญชีผู้ใช้ทั้งหมดมาแสดงในหน้าต่าง Admin พร้อมฟาร์มที่สังกัด
+function handleNewUserRoleChange() {
+  const roleSelect = document.getElementById('new-user-role');
+  const farmSelect = document.getElementById('new-user-farm');
+  if (!roleSelect || !farmSelect) return;
+
+  if (roleSelect.value === 'admin') {
+    farmSelect.innerHTML = `<option value="all">ทุกฟาร์ม (All Farms)</option>`;
+    farmSelect.disabled = true;
+  } else {
+    farmSelect.disabled = false;
+    farmSelect.innerHTML = currentFarms.map(f => `<option value="${f.id}">${f.name} (${f.id})</option>`).join('');
+  }
+}
+
 async function fetchAdminUsers() {
   try {
+    handleNewUserRoleChange();
     const res = await apiFetch('/api/users');
     const users = await res.json();
     const listEl = document.getElementById('admin-users-list');
     if (!listEl) return;
 
-    listEl.innerHTML = users.map(u => `
-      <div class="rounded-md border border-border bg-card px-3.5 py-2 flex justify-between items-center text-xs">
-        <div class="flex items-center gap-2">
-          <span class="font-medium text-foreground">${u.username}</span>
-          <span class="sh-badge ${u.role === 'admin' ? 'bg-primary text-primary-foreground' : 'bg-secondary text-secondary-foreground'}">${u.role}</span>
+    listEl.innerHTML = users.map(u => {
+      const isUserRole = u.role !== 'admin';
+      const farmOptions = currentFarms.map(f => `
+        <option value="${f.id}" ${u.farm_id === f.id ? 'selected' : ''}>${f.name} (${f.id})</option>
+      `).join('');
+
+      return `
+        <div class="rounded-md border border-border bg-card px-3.5 py-2.5 flex flex-wrap justify-between items-center gap-2 text-xs">
+          <div class="flex items-center gap-2 flex-wrap">
+            <span class="font-medium text-foreground">${u.username}</span>
+            <span class="sh-badge ${u.role === 'admin' ? 'bg-primary text-primary-foreground' : 'bg-secondary text-secondary-foreground'}">${u.role}</span>
+            ${isUserRole ? `
+              <div class="flex items-center gap-1.5 ml-1">
+                <span class="text-muted-foreground text-[11px]">สังกัดฟาร์ม:</span>
+                <select onchange="changeUserFarm(${u.id}, this.value)" class="sh-select h-7 py-0 px-2 w-auto text-[11px]">
+                  ${farmOptions}
+                </select>
+              </div>
+            ` : `
+              <span class="text-[11px] text-emerald-500 font-medium ml-1">ดูแลได้ทุกฟาร์ม</span>
+            `}
+          </div>
+          ${u.id !== currentUser.id ? `
+            <button onclick="deleteUser(${u.id})" class="sh-btn sh-btn-outline h-7 px-2.5 text-rose-500 hover:text-rose-600">ลบ</button>
+          ` : `<span class="text-[11px] text-muted-foreground">กำลังใช้งาน</span>`}
         </div>
-        ${u.id !== currentUser.id ? `
-          <button onclick="deleteUser(${u.id})" class="sh-btn sh-btn-outline h-7 px-2.5 text-rose-500 hover:text-rose-600">ลบ</button>
-        ` : `<span class="text-[11px] text-muted-foreground">กำลังใช้งาน</span>`}
-      </div>
-    `).join('');
+      `;
+    }).join('');
   } catch (err) {
     console.error('Fetch users error:', err);
   }
 }
 
+// เปลี่ยนฟาร์มที่สังกัดของ User จากหน้า Admin ทันที
+async function changeUserFarm(userId, farmId) {
+  try {
+    const res = await apiFetch(`/api/users/${userId}/farm`, {
+      method: 'PUT',
+      body: JSON.stringify({ farm_id: farmId })
+    });
+    if (!res.ok) alert('เปลี่ยนฟาร์มของผู้ใช้ไม่สำเร็จ');
+  } catch (err) {
+    alert('เปลี่ยนฟาร์มของผู้ใช้ไม่สำเร็จ');
+  }
+}
+
+// สร้างบัญชีผู้ใช้ใหม่จากฟอร์มในหน้าต่าง Admin (พร้อมกำหนดฟาร์มที่สังกัด)
 async function handleCreateUser(e) {
   e.preventDefault();
   const username = document.getElementById('new-user-name').value.trim();
   const password = document.getElementById('new-user-pass').value;
   const role = document.getElementById('new-user-role').value;
+  const farmSelect = document.getElementById('new-user-farm');
+  const farm_id = role === 'admin' ? 'all' : (farmSelect ? farmSelect.value : 'farm1');
 
   try {
     const res = await apiFetch('/api/users', {
       method: 'POST',
-      body: JSON.stringify({ username, password, role })
+      body: JSON.stringify({ username, password, role, farm_id })
     });
     const data = await res.json();
     if (!res.ok) return alert(data.error || 'สร้างผู้ใช้ไม่สำเร็จ');
@@ -1191,6 +1308,7 @@ async function handleCreateUser(e) {
   }
 }
 
+// ลบบัญชีผู้ใช้งานที่เลือก (เฉพาะ Admin)
 async function deleteUser(userId) {
   try {
     const res = await apiFetch(`/api/users/${userId}`, { method: 'DELETE' });
@@ -1202,6 +1320,7 @@ async function deleteUser(userId) {
   }
 }
 
+// ดึงสถานะตั้งค่าความปลอดภัยและรายการ Security Audit Logs มาแสดง
 async function fetchSecurityData() {
   try {
     const res = await apiFetch('/api/security/status');
@@ -1233,6 +1352,7 @@ async function fetchSecurityData() {
   }
 }
 
+// บันทึกการเปิด/ปิดสวิตช์ตรวจ Sensor Key และตรวจช่วงค่าผิดปกติไปที่ Server
 async function updateSecurityConfig() {
   const requireSensorKey = document.getElementById('sec-require-key').checked;
   const validateRange = document.getElementById('sec-validate-range').checked;

@@ -27,11 +27,13 @@ app.use(express.static(path.join(__dirname, '../public')));
 // ----------------------------------------------------
 const activeSessions = new Map(); // token -> { id, username, role, createdAt }
 
+// เข้ารหัสรหัสผ่านด้วย Scrypt + Salt ก่อนเก็บลงฐานข้อมูล (ไม่เก็บรหัสเปลือย)
 function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
   const hash = crypto.scryptSync(password, salt, 64).toString('hex');
   return { salt, hash };
 }
 
+// ตรวจสอบรหัสผ่านที่กรอกตอน Login ว่าตรงกับ Hash ในฐานข้อมูลหรือไม่
 function verifyPassword(password, salt, expectedHash) {
   const hashBuffer = crypto.scryptSync(password, salt, 64);
   const expectedBuffer = Buffer.from(expectedHash, 'hex');
@@ -39,18 +41,21 @@ function verifyPassword(password, salt, expectedHash) {
   return crypto.timingSafeEqual(hashBuffer, expectedBuffer);
 }
 
+// สร้าง Token สุ่ม 32 ไบต์ (บัตรผ่าน) เมื่อ Login สำเร็จ แล้วเก็บไว้ใน Memory
 function createSession(user) {
   const token = crypto.randomBytes(32).toString('hex');
   const sessionData = {
     id: user.id,
     username: user.username,
     role: user.role,
+    farm_id: user.role === 'admin' ? 'all' : (user.farm_id || 'farm1'),
     createdAt: Date.now()
   };
   activeSessions.set(token, sessionData);
   return token;
 }
 
+// ดึงข้อมูลผู้ใช้จาก Bearer Token ที่แนบมากับ Header ของคำขอ (Request)
 function getSessionFromHeader(req) {
   const authHeader = req.headers.authorization || '';
   if (!authHeader.startsWith('Bearer ')) return null;
@@ -58,6 +63,7 @@ function getSessionFromHeader(req) {
   return activeSessions.get(token) || null;
 }
 
+// ด่านตรวจสิทธิ์ผู้ใช้ทั่วไป: ต้อง Login มี Token ถึงจะเรียก API ได้
 function requireAuth(req, res, next) {
   const session = getSessionFromHeader(req);
   if (!session) {
@@ -67,6 +73,7 @@ function requireAuth(req, res, next) {
   next();
 }
 
+// ด่านตรวจสิทธิ์แอดมิน: ต้อง Login และมี role เป็น 'admin' เท่านั้นถึงจะผ่านได้
 function requireAdmin(req, res, next) {
   const session = getSessionFromHeader(req);
   if (!session) {
@@ -102,6 +109,7 @@ let sensorSecurityConfig = {
   rateLimitMs: 800         // ป้องกันการยิงสแปมถี่เกิน 0.8 วินาที
 };
 
+// บันทึกประวัติความปลอดภัยลงฐานข้อมูล และแจ้งเตือนขึ้นหน้าเว็บทันทีผ่าน Socket.io
 function logSecurityEvent(eventType, message) {
   db.run(
     `INSERT INTO security_logs (event_type, message) VALUES (?, ?)`,
@@ -114,6 +122,7 @@ function logSecurityEvent(eventType, message) {
   });
 }
 
+// โหลดข้อมูลฟาร์มและโรงเรือนทั้งหมดจาก DB มาเก็บไว้ในตัวแปร housesState (ใช้เป็น Whitelist)
 function loadTopologyFromDB(callback) {
   db.all(`SELECT * FROM farms ORDER BY created_at ASC`, [], (err, farms) => {
     if (err) return console.error('Error loading farms:', err);
@@ -170,7 +179,7 @@ function loadTopologyFromDB(callback) {
 }
 
 db.serialize(() => {
-  // 1. ตารางผู้ใช้งาน (Users)
+  // 1. ตารางผู้ใช้งาน (Users) - เพิ่ม farm_id เพื่อกำหนดว่า User แต่ละคนคุมฟาร์มไหนได้
   db.run(`
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -178,9 +187,13 @@ db.serialize(() => {
       password_hash TEXT NOT NULL,
       salt TEXT NOT NULL,
       role TEXT NOT NULL DEFAULT 'user',
+      farm_id TEXT NOT NULL DEFAULT 'farm1',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  // อัปเกรดตาราง users เดิมหากยังไม่มีคอลัมน์ farm_id
+  db.run(`ALTER TABLE users ADD COLUMN farm_id TEXT NOT NULL DEFAULT 'farm1'`, () => {});
 
   // 2. ตารางฟาร์ม (Farms)
   db.run(`
@@ -240,37 +253,47 @@ db.serialize(() => {
     )
   `);
 
-  // Seed Default Users (admin / admin1234 และ user / user1234)
-  db.get(`SELECT COUNT(*) as count FROM users`, [], (err, row) => {
-    if (!err && row && row.count === 0) {
-      const adminCred = hashPassword('admin1234');
-      const userCred = hashPassword('user1234');
-      db.run(
-        `INSERT INTO users (username, password_hash, salt, role) VALUES (?, ?, ?, ?)`,
-        ['admin', adminCred.hash, adminCred.salt, 'admin']
-      );
-      db.run(
-        `INSERT INTO users (username, password_hash, salt, role) VALUES (?, ?, ?, ?)`,
-        ['user', userCred.hash, userCred.salt, 'user']
-      );
-      console.log('🔐 Seeded default users: admin/admin1234 (Admin), user/user1234 (User)');
+  // Seed Default Farms (farm1 = ฟาร์มหลัก, farm2 = psu frame) และ Coops
+  db.run(`INSERT OR IGNORE INTO farms (id, name, location) VALUES ('farm1', 'ฟาร์มหลัก (Main Farm)', 'Zone A')`);
+  db.run(`INSERT OR IGNORE INTO farms (id, name, location) VALUES ('farm2', 'psu frame', 'Zone B')`, () => {
+    const stmt = db.prepare(`INSERT OR IGNORE INTO coops (id, farm_id, name, sensor_key) VALUES (?, ?, ?, ?)`);
+    stmt.run('house1', 'farm1', 'Chicken House #1', DEFAULT_SENSOR_KEY);
+    stmt.run('house2', 'farm1', 'Chicken House #2', DEFAULT_SENSOR_KEY);
+    stmt.run('house3', 'farm1', 'Chicken House #3', DEFAULT_SENSOR_KEY);
+    stmt.run('house4', 'farm2', 'Chicken House #4', DEFAULT_SENSOR_KEY);
+    stmt.finalize(() => {
+      loadTopologyFromDB();
+    });
+  });
+
+  // Seed & Ensure Default Users:
+  // 1) admin / admin1234 (Admin ดูและสั่งได้ทุกฟาร์ม)
+  // 2) user / user1234 (User 1 ประจำ ฟาร์มหลัก farm1)
+  // 3) user2 / user1234 (User 2 ประจำ psu frame farm2)
+  db.get(`SELECT * FROM users WHERE username = 'admin'`, [], (err, row) => {
+    if (!row) {
+      const cred = hashPassword('admin1234');
+      db.run(`INSERT INTO users (username, password_hash, salt, role, farm_id) VALUES (?, ?, ?, 'admin', 'all')`, ['admin', cred.hash, cred.salt]);
+    } else {
+      db.run(`UPDATE users SET farm_id = 'all' WHERE username = 'admin'`);
     }
   });
 
-  // Seed Default Farm & 3 Coops
-  db.get(`SELECT COUNT(*) as count FROM farms`, [], (err, row) => {
-    if (!err && row && row.count === 0) {
-      db.run(`INSERT INTO farms (id, name, location) VALUES ('farm1', 'ฟาร์มหลัก (Main Farm)', 'Zone A')`, () => {
-        const stmt = db.prepare(`INSERT OR IGNORE INTO coops (id, farm_id, name, sensor_key) VALUES (?, ?, ?, ?)`);
-        stmt.run('house1', 'farm1', 'Chicken House #1', DEFAULT_SENSOR_KEY);
-        stmt.run('house2', 'farm1', 'Chicken House #2', DEFAULT_SENSOR_KEY);
-        stmt.run('house3', 'farm1', 'Chicken House #3', DEFAULT_SENSOR_KEY);
-        stmt.finalize(() => {
-          loadTopologyFromDB();
-        });
-      });
+  db.get(`SELECT * FROM users WHERE username = 'user'`, [], (err, row) => {
+    if (!row) {
+      const cred = hashPassword('user1234');
+      db.run(`INSERT INTO users (username, password_hash, salt, role, farm_id) VALUES (?, ?, ?, 'user', 'farm1')`, ['user', cred.hash, cred.salt]);
     } else {
-      loadTopologyFromDB();
+      db.run(`UPDATE users SET farm_id = 'farm1' WHERE username = 'user'`);
+    }
+  });
+
+  db.get(`SELECT * FROM users WHERE username = 'user2'`, [], (err, row) => {
+    if (!row) {
+      const cred = hashPassword('user1234');
+      db.run(`INSERT INTO users (username, password_hash, salt, role, farm_id) VALUES (?, ?, ?, 'user', 'farm2')`, ['user2', cred.hash, cred.salt]);
+    } else {
+      db.run(`UPDATE users SET farm_id = 'farm2' WHERE username = 'user2'`);
     }
   });
 });
@@ -278,6 +301,7 @@ db.serialize(() => {
 // ----------------------------------------------------
 // 3. FORMULA: THI (ดัชนีความเครียดจากความร้อนของไก่)
 // ----------------------------------------------------
+// คำนวณค่า THI จากอุณหภูมิและความชื้น เพื่อประเมินความเครียดของไก่
 function calculateTHI(temp, hum) {
   if (!temp || !hum) return 0;
   const T = parseFloat(temp);
@@ -287,7 +311,7 @@ function calculateTHI(temp, hum) {
 }
 
 // ----------------------------------------------------
-// 4. MQTT CLIENT & SENSOR SECURITY
+// 4. MQTT CLIENT & SENSOR SECURITY  Server (เชื่อม MQTTS TLS + ตรวจความปลอดภัย 4 ด่าน)
 // ----------------------------------------------------
 console.log(`Connecting to MQTT broker over TLS: ${MQTT_BROKER}...`);
 const mqttClient = mqtt.connect(MQTT_BROKER, {
@@ -297,6 +321,7 @@ const mqttClient = mqtt.connect(MQTT_BROKER, {
   rejectUnauthorized: false
 });
 
+// เมื่อต่อ MQTT สำเร็จ ให้รอฟังข้อมูลเซนเซอร์และสถานะไฟจากทุกโรงเรือน (+)
 mqttClient.on('connect', () => {
   console.log('MQTT Connected successfully!');
   mqttClient.subscribe(`${MQTT_PREFIX}/+/telemetry`);
@@ -308,6 +333,7 @@ mqttClient.on('error', (err) => {
   console.error('MQTT Client Error:', err.message);
 });
 
+// รับข้อมูลจากบอร์ดผ่าน MQTT พร้อมตรวจความปลอดภัย 4 ด่านก่อนบันทึกลง DB
 mqttClient.on('message', (topic, message) => {
   try {
     const payload = JSON.parse(message.toString());
@@ -315,7 +341,7 @@ mqttClient.on('message', (topic, message) => {
     const houseId = parts[1];
     const type = parts[2];
 
-    // [SENSOR SECURITY 1] ตรวจสอบว่าเป็น Coop ที่ลงทะเบียนในระบบหรือไม่
+    // [SENSOR SECURITY 1] ตรวจสอบว่าเป็น Coop ที่ลงทะเบียนในระบบหรือไม่ ชั้น 2
     if (!housesState[houseId]) {
       logSecurityEvent('SENSOR_BLOCKED', `บล็อกข้อมูลจากโรงเรือนที่ไม่ได้ลงทะเบียน: ${houseId}`);
       return;
@@ -326,7 +352,7 @@ mqttClient.on('message', (topic, message) => {
     if (type === 'telemetry') {
       const now = Date.now();
 
-      // [SENSOR SECURITY 2] Rate Limiting ป้องกัน Flood / DoS
+      // [SENSOR SECURITY 2] Rate Limiting ป้องกัน Flood / DoS ชั้น 4 
       if (sensorRateLimit[houseId] && (now - sensorRateLimit[houseId] < sensorSecurityConfig.rateLimitMs)) {
         return;
       }
@@ -362,8 +388,8 @@ mqttClient.on('message', (topic, message) => {
       coop.thi = thi;
       coop.light = light;
       coop.lastUpdate = new Date().toISOString();
-      coop.lastRealUpdate = now;
-      coop.online = true;
+      coop.lastRealUpdate = now; // บันทึกเวลาล่าสุดที่บอร์ดส่งข้อมูลมา
+      coop.online = true;        // เปลี่ยนสถานะเป็น Online ทันที
 
       const stmt = db.prepare(`
         INSERT INTO sensor_history (house_id, temperature, humidity, thi, light_state)
@@ -427,7 +453,7 @@ function setLight(houseId, action, sender = 'User') {
 }
 
 // ----------------------------------------------------
-// 5. HEARTBEAT TIMEOUT & DEMO MODE
+// 5. HEARTBEAT TIMEOUT & DEMO MODE 10 วิบอดดับ
 // ----------------------------------------------------
 const TIMEOUT_OFFLINE_MS = 10000;
 
@@ -458,6 +484,7 @@ setInterval(() => {
 let demoMode = false;
 let demoInterval = null;
 
+// สร้างข้อมูลจำลอง (อุณหภูมิ/ความชื้นสุ่มขยับ) สำหรับโหมด Demo
 function generateDemoStep() {
   const nowIso = new Date().toISOString();
   Object.keys(housesState).forEach((houseId, idx) => {
@@ -509,6 +536,7 @@ function generateDemoStep() {
   });
 }
 
+// เปิดโหมดข้อมูลตัวอย่าง (Demo Mode) ส่งค่าจำลองทุก 3 วินาที
 function startDemoMode() {
   if (demoInterval) clearInterval(demoInterval);
   demoMode = true;
@@ -517,6 +545,7 @@ function startDemoMode() {
   demoInterval = setInterval(generateDemoStep, 3000);
 }
 
+// ปิดโหมดข้อมูลตัวอย่าง แล้วสลับกลับไปรอรับค่าจากบอร์ดจริง
 function stopDemoMode() {
   demoMode = false;
   if (demoInterval) {
@@ -550,6 +579,7 @@ io.on('connection', (socket) => {
 // ----------------------------------------------------
 // 6. AUTHENTICATION & USER MANAGEMENT ROUTES
 // ----------------------------------------------------
+// API เข้าสู่ระบบ: ตรวจรหัสผ่านและสร้าง Token ส่งกลับไปให้หน้าเว็บ API Login / Logout / จัดการผู้ใช้
 app.post('/api/auth/login', (req, res) => {
   const { username, password } = req.body || {};
   if (!username || !password) {
@@ -563,16 +593,18 @@ app.post('/api/auth/login', (req, res) => {
       return res.status(401).json({ error: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' });
     }
 
+    const assignedFarm = user.role === 'admin' ? 'all' : (user.farm_id || 'farm1');
     const token = createSession(user);
-    logSecurityEvent('AUTH', `ผู้ใช้ ${user.username} (${user.role}) เข้าสู่ระบบสำเร็จ`);
+    logSecurityEvent('AUTH', `ผู้ใช้ ${user.username} (${user.role} | ฟาร์ม: ${assignedFarm}) เข้าสู่ระบบสำเร็จ`);
     res.json({
       success: true,
       token,
-      user: { id: user.id, username: user.username, role: user.role }
+      user: { id: user.id, username: user.username, role: user.role, farm_id: assignedFarm }
     });
   });
 });
 
+// API ออกจากระบบ: ลบ Token ออกจาก Memory
 app.post('/api/auth/logout', requireAuth, (req, res) => {
   const authHeader = req.headers.authorization || '';
   const token = authHeader.slice(7).trim();
@@ -581,30 +613,33 @@ app.post('/api/auth/logout', requireAuth, (req, res) => {
   res.json({ success: true });
 });
 
+// API เช็คข้อมูลผู้ใช้ปัจจุบันที่กำลัง Login อยู่
 app.get('/api/auth/me', requireAuth, (req, res) => {
   res.json({ user: req.user });
 });
 
-// Admin: จัดการผู้ใช้งาน
+// Admin: ดึงรายชื่อผู้ใช้งานทั้งหมด (พร้อมฟาร์มที่สังกัด)
 app.get('/api/users', requireAdmin, (req, res) => {
-  db.all(`SELECT id, username, role, created_at FROM users ORDER BY id ASC`, [], (err, rows) => {
+  db.all(`SELECT id, username, role, farm_id, created_at FROM users ORDER BY id ASC`, [], (err, rows) => {
     if (err) return res.status(500).json({ error: err.message });
     res.json(rows);
   });
 });
 
+// Admin: สร้างบัญชีผู้ใช้ใหม่ (กำหนดสิทธิ์ admin หรือ user และกำหนดว่าสังกัดฟาร์มไหนได้)
 app.post('/api/users', requireAdmin, (req, res) => {
-  const { username, password, role } = req.body || {};
+  const { username, password, role, farm_id } = req.body || {};
   if (!username || !password) {
     return res.status(400).json({ error: 'กรุณาระบุ username และ password' });
   }
   const cleanUser = username.trim();
   const validRole = role === 'admin' ? 'admin' : 'user';
+  const assignedFarm = validRole === 'admin' ? 'all' : (farm_id || 'farm1');
   const { salt, hash } = hashPassword(password);
 
   db.run(
-    `INSERT INTO users (username, password_hash, salt, role) VALUES (?, ?, ?, ?)`,
-    [cleanUser, hash, salt, validRole],
+    `INSERT INTO users (username, password_hash, salt, role, farm_id) VALUES (?, ?, ?, ?, ?)`,
+    [cleanUser, hash, salt, validRole, assignedFarm],
     function (err) {
       if (err) {
         if (err.message.includes('UNIQUE')) {
@@ -612,12 +647,25 @@ app.post('/api/users', requireAdmin, (req, res) => {
         }
         return res.status(500).json({ error: err.message });
       }
-      logSecurityEvent('ADMIN_ACTION', `Admin ${req.user.username} สร้างบัญชีผู้ใช้ใหม่: ${cleanUser} (${validRole})`);
+      logSecurityEvent('ADMIN_ACTION', `Admin ${req.user.username} สร้างบัญชีผู้ใช้ใหม่: ${cleanUser} (${validRole} | ฟาร์ม: ${assignedFarm})`);
       res.json({ success: true, id: this.lastID });
     }
   );
 });
 
+// Admin: เปลี่ยนฟาร์มที่สังกัดของ User
+app.put('/api/users/:id/farm', requireAdmin, (req, res) => {
+  const targetId = parseInt(req.params.id, 10);
+  const { farm_id } = req.body || {};
+  if (!farm_id) return res.status(400).json({ error: 'กรุณาระบุฟาร์ม' });
+  db.run(`UPDATE users SET farm_id = ? WHERE id = ?`, [farm_id, targetId], function (err) {
+    if (err) return res.status(500).json({ error: err.message });
+    logSecurityEvent('ADMIN_ACTION', `Admin ${req.user.username} เปลี่ยนฟาร์มของผู้ใช้ ID ${targetId} เป็น ${farm_id}`);
+    res.json({ success: true });
+  });
+});
+
+// Admin: ลบบัญชีผู้ใช้งาน
 app.delete('/api/users/:id', requireAdmin, (req, res) => {
   const targetId = parseInt(req.params.id, 10);
   if (targetId === req.user.id) {
@@ -633,13 +681,31 @@ app.delete('/api/users/:id', requireAdmin, (req, res) => {
 // ----------------------------------------------------
 // 7. FARMS & COOPS ROUTES (Admin เท่านั้นที่เพิ่ม/ลบได้)
 // ----------------------------------------------------
+// ดึงโครงสร้างฟาร์มและโรงเรือน (ถ้าเป็น User ปกติ จะส่งไปเฉพาะฟาร์มที่ User คนนั้นสังกัดเท่านั้น)
 app.get('/api/topology', requireAuth, (req, res) => {
+  if (req.user.role === 'admin') {
+    return res.json({
+      farms: Object.values(farmsMap),
+      houses: housesState
+    });
+  }
+
+  const userFarmId = req.user.farm_id || 'farm1';
+  const filteredFarms = farmsMap[userFarmId] ? [farmsMap[userFarmId]] : [];
+  const filteredHouses = {};
+  Object.keys(housesState).forEach(hId => {
+    if (housesState[hId].farmId === userFarmId) {
+      filteredHouses[hId] = housesState[hId];
+    }
+  });
+
   res.json({
-    farms: Object.values(farmsMap),
-    houses: housesState
+    farms: filteredFarms,
+    houses: filteredHouses
   });
 });
 
+// Admin: เพิ่มฟาร์มใหม่ลงฐานข้อมูล
 app.post('/api/farms', requireAdmin, (req, res) => {
   const { id, name, location } = req.body || {};
   if (!name || !name.trim()) {
@@ -669,6 +735,7 @@ app.post('/api/farms', requireAdmin, (req, res) => {
   );
 });
 
+// Admin: ลบฟาร์มและโรงเรือนที่อยู่ในฟาร์มนั้น
 app.delete('/api/farms/:id', requireAdmin, (req, res) => {
   const farmId = req.params.id;
   if (Object.keys(farmsMap).length <= 1) {
@@ -687,6 +754,7 @@ app.delete('/api/farms/:id', requireAdmin, (req, res) => {
   });
 });
 
+// Admin: เพิ่มโรงเรือนใหม่ (ขึ้นทะเบียนเข้า Whitelist ทันที) API หลังบ้านสำหรับเพิ่มโรงเรือน
 app.post('/api/coops', requireAdmin, (req, res) => {
   const { id, farm_id, name, sensor_key } = req.body || {};
   if (!farm_id || !name || !name.trim()) {
@@ -721,6 +789,7 @@ app.post('/api/coops', requireAdmin, (req, res) => {
   );
 });
 
+// Admin: ลบโรงเรือนออกจากระบบ
 app.delete('/api/coops/:id', requireAdmin, (req, res) => {
   const coopId = req.params.id;
   db.run(`DELETE FROM coops WHERE id = ?`, [coopId], function (err) {
@@ -736,6 +805,7 @@ app.delete('/api/coops/:id', requireAdmin, (req, res) => {
 // ----------------------------------------------------
 // 8. SENSOR SECURITY SETTINGS & LOGS (Admin Only)
 // ----------------------------------------------------
+// Admin: ดึงค่าตั้งค่าความปลอดภัยและประวัติ Security Audit Logs 40 รายการล่าสุด
 app.get('/api/security/status', requireAdmin, (req, res) => {
   db.all(`SELECT * FROM security_logs ORDER BY id DESC LIMIT 40`, [], (err, logs) => {
     res.json({
@@ -745,6 +815,7 @@ app.get('/api/security/status', requireAdmin, (req, res) => {
   });
 });
 
+// Admin: เปิด/ปิดโหมดตรวจ Sensor Key แบบเข้มงวด และการตรวจช่วงค่าผิดปกติ
 app.post('/api/security/config', requireAdmin, (req, res) => {
   const { requireSensorKey, validateRange } = req.body || {};
   if (typeof requireSensorKey === 'boolean') {
@@ -760,10 +831,12 @@ app.post('/api/security/config', requireAdmin, (req, res) => {
 // ----------------------------------------------------
 // 9. TELEMETRY, LIGHT, RULES & EXPORT ROUTES (Protected)
 // ----------------------------------------------------
+// ดึงสถานะล่าสุดของทุกโรงเรือน
 app.get('/api/houses', requireAuth, (req, res) => {
   res.json(housesState);
 });
 
+// สร้างข้อมูลค่า 0 สำหรับพล็อตกราฟกรณีโรงเรือนยังไม่ออนไลน์
 function buildZeroRows(houseId, count = 10) {
   const rows = [];
   const now = Date.now();
@@ -780,9 +853,10 @@ function buildZeroRows(houseId, count = 10) {
   return rows;
 }
 
+// ดึงข้อมูลย้อนหลังสำหรับนำไปวาดกราฟบนหน้าเว็บ (จำกัดเฉพาะฟาร์มของ User หากไม่ใช่ Admin)
 app.get('/api/history', requireAuth, (req, res) => {
   const houseId = req.query.house || 'all';
-  const farmId = req.query.farm || 'all';
+  const farmId = req.user.role === 'admin' ? (req.query.farm || 'all') : (req.user.farm_id || 'farm1');
   const limit = parseInt(req.query.limit, 10) || 25;
 
   const targetCoopIds = Object.keys(housesState).filter(id => {
@@ -819,31 +893,57 @@ app.get('/api/history', requireAuth, (req, res) => {
   });
 });
 
+// API สั่งเปิด-ปิดไฟโรงเรือน (1 User สั่งได้เฉพาะโรงเรือนในฟาร์มของตัวเองเท่านั้น ส่วน Admin สั่งได้ทุกฟาร์ม)
 app.post('/api/light', requireAuth, (req, res) => {
   const { houseId, farmId, action } = req.body || {};
   if (!houseId || !action) return res.status(400).json({ error: 'Missing params' });
 
+  const isAdmin = req.user.role === 'admin';
+  const allowedFarmId = isAdmin ? (farmId || 'all') : (req.user.farm_id || 'farm1');
+
   if (houseId === 'all') {
     Object.keys(housesState).forEach(h => {
-      if (!farmId || farmId === 'all' || housesState[h].farmId === farmId) {
+      if (allowedFarmId === 'all' || housesState[h].farmId === allowedFarmId) {
         setLight(h, action, req.user.username);
       }
     });
   } else {
+    const targetCoop = housesState[houseId];
+    if (!targetCoop) {
+      return res.status(404).json({ error: 'ไม่พบโรงเรือนนี้' });
+    }
+    if (!isAdmin && targetCoop.farmId !== allowedFarmId) {
+      logSecurityEvent('AUTH_BLOCKED', `บล็อกผู้ใช้ ${req.user.username} (${allowedFarmId}) พยายามสั่งไฟโรงเรือน ${houseId} ข้ามฟาร์ม`);
+      return res.status(403).json({ error: 'คุณมีสิทธิ์สั่งงานเฉพาะโรงเรือนในฟาร์มของตัวเองเท่านั้น' });
+    }
     setLight(houseId, action, req.user.username);
   }
   res.json({ success: true, houseId, action });
 });
 
+// ดึงรายการกฎอัตโนมัติ (Automation Rules) เฉพาะฟาร์มที่มีสิทธิ์
 app.get('/api/rules', requireAuth, (req, res) => {
   db.all('SELECT * FROM automation_rules', [], (err, rows) => {
     if (err) return res.status(500).json({ error: err.message });
-    res.json(rows);
+    if (req.user.role === 'admin') return res.json(rows || []);
+    const userFarmId = req.user.farm_id || 'farm1';
+    const filtered = (rows || []).filter(r => {
+      if (r.house_id === 'all') return true;
+      return housesState[r.house_id] && housesState[r.house_id].farmId === userFarmId;
+    });
+    res.json(filtered);
   });
 });
 
+// เพิ่มกฎอัตโนมัติใหม่ (ตรวจสอบสิทธิ์ฟาร์มของ User)
 app.post('/api/rules', requireAuth, (req, res) => {
   const { name, house_id, metric, operator, threshold, action } = req.body || {};
+  if (req.user.role !== 'admin' && house_id !== 'all') {
+    const coop = housesState[house_id];
+    if (!coop || coop.farmId !== (req.user.farm_id || 'farm1')) {
+      return res.status(403).json({ error: 'คุณตั้งกฎได้เฉพาะโรงเรือนในฟาร์มของตัวเองเท่านั้น' });
+    }
+  }
   db.run(
     `INSERT INTO automation_rules (name, house_id, metric, operator, threshold, action)
      VALUES (?, ?, ?, ?, ?, ?)`,
@@ -855,6 +955,7 @@ app.post('/api/rules', requireAuth, (req, res) => {
   );
 });
 
+// ลบกฎอัตโนมัติ
 app.delete('/api/rules/:id', requireAuth, (req, res) => {
   db.run('DELETE FROM automation_rules WHERE id = ?', [req.params.id], function (err) {
     if (err) return res.status(500).json({ error: err.message });
@@ -862,6 +963,7 @@ app.delete('/api/rules/:id', requireAuth, (req, res) => {
   });
 });
 
+// ส่งออกข้อมูลประวัติเซนเซอร์ 500 รายการล่าสุดเป็นไฟล์ CSV
 app.get('/api/export/csv', requireAuth, (req, res) => {
   db.all('SELECT * FROM sensor_history ORDER BY id DESC LIMIT 500', [], (err, rows) => {
     if (err) return res.status(500).send('Error');
@@ -875,10 +977,12 @@ app.get('/api/export/csv', requireAuth, (req, res) => {
   });
 });
 
+// เช็คสถานะโหมด Demo ปัจจุบัน
 app.get('/api/demo', requireAuth, (req, res) => {
   res.json({ demoMode });
 });
 
+// สลับเปิด/ปิดโหมด Demo จากหน้าเว็บ
 app.post('/api/demo', requireAuth, (req, res) => {
   const enabled = req.body && req.body.enabled !== undefined ? !!req.body.enabled : !demoMode;
   if (enabled) {

@@ -222,16 +222,22 @@
         <p class="text-xs text-muted-foreground">เลือกสิทธิ์เพื่อเข้าใช้งาน หรือกรอกชื่อผู้ใช้ด้านล่าง</p>
       </div>
 
-      <!-- ปุ่มเข้าสู่ระบบด่วนในคลิกเดียว (ไม่ต้องเสียเวลาพิมพ์เองเวลาทดสอบ) -->
-      <div class="grid grid-cols-2 gap-2.5">
-        <button type="button" onclick="quickLogin('admin', 'admin1234')" class="sh-btn sh-btn-primary h-11 flex-col gap-0.5 py-2">
-          <span class="text-xs font-semibold flex items-center gap-1.5"><i class="fa-solid fa-user-shield"></i> เข้าด้วย Admin</span>
-          <span class="text-[10px] opacity-75 font-normal">เพิ่ม/ลบ ฟาร์ม &amp; โรงเรือนได้</span>
+      <!-- ปุ่มเข้าสู่ระบบด่วนในคลิกเดียว (1 User คุมได้ 1 ฟาร์ม ส่วน Admin คุมได้ทุกฟาร์ม) -->
+      <div class="space-y-2">
+        <button type="button" onclick="quickLogin('admin', 'admin1234')" class="sh-btn sh-btn-primary w-full h-11 flex-col gap-0.5 py-2">
+          <span class="text-xs font-semibold flex items-center gap-1.5"><i class="fa-solid fa-user-shield"></i> เข้าด้วย Admin (ผู้ดูแลระบบ)</span>
+          <span class="text-[10px] opacity-75 font-normal">ดูได้ทุกฟาร์ม &amp; เพิ่ม/ลบ ฟาร์ม, โรงเรือน, ผู้ใช้</span>
         </button>
-        <button type="button" onclick="quickLogin('user', 'user1234')" class="sh-btn sh-btn-outline h-11 flex-col gap-0.5 py-2">
-          <span class="text-xs font-semibold flex items-center gap-1.5"><i class="fa-solid fa-user"></i> เข้าด้วย User</span>
-          <span class="text-[10px] text-muted-foreground font-normal">ดูข้อมูล &amp; สั่งเปิด/ปิดไฟ</span>
-        </button>
+        <div class="grid grid-cols-2 gap-2">
+          <button type="button" onclick="quickLogin('user', 'user1234')" class="sh-btn sh-btn-outline h-11 flex-col gap-0.5 py-2">
+            <span class="text-xs font-semibold flex items-center gap-1.5"><i class="fa-solid fa-user"></i> User 1 (ฟาร์มหลัก)</span>
+            <span class="text-[10px] text-muted-foreground font-normal">สั่งได้เฉพาะ ฟาร์มหลัก</span>
+          </button>
+          <button type="button" onclick="quickLogin('user2', 'user1234')" class="sh-btn sh-btn-outline h-11 flex-col gap-0.5 py-2">
+            <span class="text-xs font-semibold flex items-center gap-1.5"><i class="fa-solid fa-user"></i> User 2 (psu frame)</span>
+            <span class="text-[10px] text-muted-foreground font-normal">สั่งได้เฉพาะ psu frame</span>
+          </button>
+        </div>
       </div>
 
       <div class="relative flex items-center justify-center">
@@ -596,7 +602,7 @@
 
         <!-- TAB 1: USERS -->
         <div id="admin-tab-users" class="space-y-4">
-          <form onsubmit="handleCreateUser(event)" class="grid grid-cols-1 sm:grid-cols-4 gap-2.5 items-end rounded-md border border-border bg-muted/20 p-3.5">
+          <form onsubmit="handleCreateUser(event)" class="grid grid-cols-1 sm:grid-cols-5 gap-2.5 items-end rounded-md border border-border bg-muted/20 p-3.5">
             <div>
               <label class="text-[11px] font-medium text-muted-foreground block mb-1">ชื่อผู้ใช้ (Username)</label>
               <input type="text" id="new-user-name" placeholder="เช่น staff01" required class="sh-input">
@@ -607,10 +613,14 @@
             </div>
             <div>
               <label class="text-[11px] font-medium text-muted-foreground block mb-1">สิทธิ์ (Role)</label>
-              <select id="new-user-role" class="sh-select">
-                <option value="user">User (ทั่วไป)</option>
-                <option value="admin">Admin (ผู้ดูแล)</option>
+              <select id="new-user-role" onchange="handleNewUserRoleChange()" class="sh-select">
+                <option value="user">User (1 ฟาร์ม)</option>
+                <option value="admin">Admin (ทุกฟาร์ม)</option>
               </select>
+            </div>
+            <div>
+              <label class="text-[11px] font-medium text-muted-foreground block mb-1">สังกัดฟาร์ม (Farm)</label>
+              <select id="new-user-farm" class="sh-select"></select>
             </div>
             <div>
               <button type="submit" class="sh-btn sh-btn-primary w-full h-9">เพิ่มผู้ใช้</button>
